@@ -1,0 +1,61 @@
+trigger StockDeductionTrigger on HandsMen_Order__c (after insert, after update) {
+    Set<Id> productIds = new Set<Id>();
+
+    for (HandsMen_Order__c order : Trigger.new) {
+        if (order.HandsMen_Product__c != null) {
+            productIds.add(order.HandsMen_Product__c);
+        }
+    }
+
+    if (productIds.isEmpty()) return;
+
+    Map<Id, Inventory__c> inventoryMap = new Map<Id, Inventory__c>(
+        [SELECT Id, Stock_Quantity__c, HandsMen_Product__c 
+         FROM Inventory__c 
+         WHERE HandsMen_Product__c IN :productIds]
+    );
+
+    List<Inventory__c> inventoriesToUpdate = new List<Inventory__c>();
+
+    for (HandsMen_Order__c order : Trigger.new) {
+        HandsMen_Order__c oldOrder = Trigger.isUpdate ? Trigger.oldMap.get(order.Id) : null;
+        Id productId = order.HandsMen_Product__c;
+        Decimal newQty = order.Quantity__c != null ? order.Quantity__c : 0;
+        Decimal oldQty = oldOrder != null && oldOrder.Quantity__c != null ? oldOrder.Quantity__c : 0;
+        String oldStatus = oldOrder != null ? oldOrder.Status__c : null;
+        String newStatus = order.Status__c;
+
+        for (Inventory__c inv : inventoryMap.values()) {
+            if (inv.HandsMen_Product__c == productId) {
+                Decimal delta = 0;
+
+                if (Trigger.isInsert && newStatus == 'Confirmed') {
+                    delta = -newQty;
+                } else if (Trigger.isUpdate) {
+                    if (oldStatus != 'Confirmed' && newStatus == 'Confirmed') {
+                        delta = -newQty;
+                    } else if (oldStatus == 'Confirmed' && newStatus != 'Confirmed') {
+                        delta = oldQty;
+                    } else if (oldStatus == 'Confirmed' && newStatus == 'Confirmed') {
+                        delta = oldQty - newQty;
+                    }
+                }
+
+                if (delta != 0) {
+                    if (inv.Stock_Quantity__c + delta >= 0) {
+                        inv.Stock_Quantity__c += delta;
+                        inventoriesToUpdate.add(inv);
+                    } else {
+                        System.debug('Not enough stock to fulfill order update: ' + order.Id);
+                    }
+                }
+
+                break;
+            }
+        }
+    }
+
+    if (!inventoriesToUpdate.isEmpty()) {
+        update inventoriesToUpdate;
+    }
+}
